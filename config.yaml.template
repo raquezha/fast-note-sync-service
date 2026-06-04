@@ -13,3 +13,6 @@ database:
   password: "${DB_PASSWORD}"
   name: "${DB_NAME}"
   ssl-mode: "${DB_SSL_MODE}"
+
+user:
+  register-is-enable: ${REGISTER_IS_ENABLE}

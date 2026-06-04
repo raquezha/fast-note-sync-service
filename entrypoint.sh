@@ -11,6 +11,7 @@ fi
 export RUN_MODE=${RUN_MODE:-release}
 export DB_TYPE=${DB_TYPE:-postgres}
 export DB_SSL_MODE=${DB_SSL_MODE:-require}
+export REGISTER_IS_ENABLE=${REGISTER_IS_ENABLE:-true}
 
 # Auto-generate secure AUTH_TOKEN_KEY if not provided
 if [ -z "$AUTH_TOKEN_KEY" ]; then
