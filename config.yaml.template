@@ -8,7 +8,7 @@ security:
 database:
   type: "${DB_TYPE}"
   host: "${DB_HOST}"
-  port: "${DB_PORT}"
+  port: ${DB_PORT}
   username: "${DB_USER}"
   password: "${DB_PASSWORD}"
   name: "${DB_NAME}"
