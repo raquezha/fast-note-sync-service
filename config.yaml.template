@@ -1,0 +1,15 @@
+server:
+  run-mode: "${RUN_MODE}"
+  http-port: "${PORT}"
+
+security:
+  auth-token-key: "${AUTH_TOKEN_KEY}"
+
+database:
+  type: "${DB_TYPE}"
+  host: "${DB_HOST}"
+  port: "${DB_PORT}"
+  username: "${DB_USER}"
+  password: "${DB_PASSWORD}"
+  name: "${DB_NAME}"
+  ssl-mode: "${DB_SSL_MODE}"
