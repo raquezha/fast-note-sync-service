@@ -3,7 +3,6 @@ package dao
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -374,7 +373,12 @@ func NewEngine(c config.DatabaseConfig, zapLogger *zap.Logger) (*gorm.DB, error)
 	var db *gorm.DB
 	var err error
 
-	db, err = gorm.Open(getDialector(c), &gorm.Config{
+	dialector, err := getDialector(c)
+	if err != nil {
+		return nil, err
+	}
+
+	db, err = gorm.Open(dialector, &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Info),
 		NamingStrategy: schema.NamingStrategy{
 			TablePrefix:   c.TablePrefix, // 表名前缀，`User` 的表名应该是 `t_users`
@@ -445,7 +449,7 @@ func NewEngine(c config.DatabaseConfig, zapLogger *zap.Logger) (*gorm.DB, error)
 //
 // 返回值说明:
 //   - gorm.Dialector: GORM 数据库方言
-func getDialector(c config.DatabaseConfig) gorm.Dialector {
+func getDialector(c config.DatabaseConfig) (gorm.Dialector, error) {
 	if c.Type == "mysql" {
 		host := c.Host
 		if c.Port != 0 && !strings.Contains(host, ":") {
@@ -458,7 +462,7 @@ func getDialector(c config.DatabaseConfig) gorm.Dialector {
 			c.Name,
 			c.Charset,
 			c.ParseTime,
-		))
+		)), nil
 	} else if c.Type == "postgres" {
 		if c.Port == 0 {
 			c.Port = 5432
@@ -477,27 +481,24 @@ func getDialector(c config.DatabaseConfig) gorm.Dialector {
 		if c.Schema != "" {
 			dsn = fmt.Sprintf("%s search_path=%s", dsn, c.Schema)
 		}
-		return postgres.Open(dsn)
+		return postgres.Open(dsn), nil
 	} else if c.Type == "sqlite" {
-
-		filepath.Dir(c.Path)
-
 		if !fileurl.IsExist(c.Path) {
-			fileurl.CreatePath(c.Path, os.ModePerm)
+			return nil, fmt.Errorf("sqlite database file missing: %s", c.Path)
 		}
 
 		absDb, err := filepath.Abs(c.Path)
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
 		dbSlash := "/" + strings.TrimPrefix(filepath.ToSlash(absDb), "/")
 		connStr := "file://" + dbSlash + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(10000)"
-		// connStr = "file:///" + dbSlash + "?_foreign_keys=1&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=10000&_mutex=no"
+		// connStr = "file://" + dbSlash + "?_foreign_keys=1&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=10000&_mutex=no"
 		// connStr := c.Path + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(10000)"
 
-		return sqlite.Open(connStr)
+		return sqlite.Open(connStr), nil
 	}
-	return nil
+	return nil, fmt.Errorf("unsupported database type: %s", c.Type)
 
 }
 

@@ -154,14 +154,14 @@ bash <(curl -fsSL https://cnb.cool/haierkeys/fast-note-sync-service/-/git/raw/ma
 
 ```bash
 # 1. Pull Image
-docker pull haierkeys/fast-note-sync-service:latest
+docker pull haierkeys/fast-note-sync-service:3.3.3
 
 # 2. Start Container
 docker run -tid --name fast-note-sync-service \
     -p 9000:9000 \
     -v /data/fast-note-sync/storage/:/fast-note-sync/storage/ \
     -v /data/fast-note-sync/config/:/fast-note-sync/config/ \
-    haierkeys/fast-note-sync-service:latest
+    haierkeys/fast-note-sync-service:3.3.3
 ```
 
 #### Docker Compose
@@ -172,7 +172,7 @@ Create the `docker-compose.yaml` file:
 version: '3'
 services:
   fast-note-sync-service:
-    image: haierkeys/fast-note-sync-service:latest
+    image: haierkeys/fast-note-sync-service:3.3.3
     container_name: fast-note-sync-service
     restart: always
     ports:
