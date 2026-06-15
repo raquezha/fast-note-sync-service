@@ -67,3 +67,20 @@ Known restored account in DB:
 
 - username: `raquezha`
 - email: `raquezha@gmail.com`
+
+## Daily Backup Protocol
+Automated daily backups are configured via systemd timer to ensure they run even after power outages (via `Persistent=true`).
+
+**Backup Script**: `~/RQZ/personal/nothing/scripts/daily-backup.sh`
+**Backs up**:
+1. Obsidian Notes (`~/RQZ/notes`)
+2. Fast Note Sync Data (`/data/fast-note-sync`)
+3. Homelab Configs (`~/homelab`)
+
+**Retention**: 7 days of historical tarballs in `~/backups/daily/`.
+
+To re-enable or check status:
+```bash
+systemctl status nothing-backup.timer
+```
+
