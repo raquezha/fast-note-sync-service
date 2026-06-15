@@ -2,6 +2,7 @@ services:
   fast-note-sync-service:
     image: haierkeys/fast-note-sync-service:3.3.3
     container_name: fast-note-sync-service
+    restart: unless-stopped
     ports:
       - "${HOST_BIND:-127.0.0.1}:9002:9000"
       - "${HOST_BIND:-127.0.0.1}:9003:9001"
