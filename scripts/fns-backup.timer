@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Daily Backup of Obsidian and Fast Note Sync
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Backup of Obsidian and Fast Note Sync
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/bash /home/raquezha/RQZ/personal/fast-note-sync-service/scripts/backup.sh
+
+[Install]
+WantedBy=multi-user.target

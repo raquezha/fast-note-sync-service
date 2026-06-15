@@ -71,7 +71,7 @@ Known restored account in DB:
 ## Daily Backup Protocol
 Automated daily backups are configured via systemd timer to ensure they run even after power outages (via `Persistent=true`).
 
-**Backup Script**: `~/RQZ/personal/nothing/scripts/daily-backup.sh`
+**Backup Script**: `~/RQZ/personal/fast-note-sync-service/scripts/backup.sh`
 **Backs up**:
 1. Obsidian Notes (`~/RQZ/notes`)
 2. Fast Note Sync Data (`/data/fast-note-sync`)
@@ -79,8 +79,12 @@ Automated daily backups are configured via systemd timer to ensure they run even
 
 **Retention**: 7 days of historical tarballs in `~/backups/daily/`.
 
-To re-enable or check status:
+To install:
 ```bash
-systemctl status nothing-backup.timer
+sudo cp ~/RQZ/personal/fast-note-sync-service/scripts/fns-backup.service /etc/systemd/system/
+sudo cp ~/RQZ/personal/fast-note-sync-service/scripts/fns-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fns-backup.timer
 ```
+
 
