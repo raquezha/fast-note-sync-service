@@ -46,6 +46,7 @@
   * 详情请参阅 [RESTful API 文档](/docs/REST_API.md) 或 [OpenAPI 文档](/docs/swagger.yaml)。
 * **💻 Web 管理面板**：
   * 内置现代化管理界面，轻松创建用户、生成插件配置、管理仓库及笔记内容。
+  * 支持 WebGUI OIDC 登录。请参阅 [OIDC 登录运行手册](/docs/runbook/OIDC.zh-CN.md)。
 * **🔄 多端笔记同步**：
   * 支持 **Vault (仓库)** 自动创建。
   * 支持笔记管理（增、删、改、查），变更毫秒级实时分发至所有在线设备。
@@ -225,6 +226,8 @@ docker compose up -d
 FNS 现已原生支持 **MCP (Model Context Protocol)**，并同时提供 **SSE** 和 **StreamableHTTP** 两种传输协议。
 
 您可以将 FNS 作为 MCP 服务端直接接入 Cherry Studio、Cursor、Claude Code、hermes-agent 等兼容的 AI 客户端。接入后，AI 即可具备读写私人笔记和附件的能力。同时，所有由 MCP 产生的修改，都会通过 WebSocket 实时同步到您的各个设备终端。
+
+如需使用 Stytch 配置受 OAuth 保护的 MCP 部署，请阅读 [MCP OAuth 与 Stytch 运行手册](runbook/mcp-oauth-stytch.zh-CN.md)。
 
 ### 通用请求头参数
 
