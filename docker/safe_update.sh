@@ -14,25 +14,48 @@ fail() {
   exit 1
 }
 
-[ -f "$COMPOSE_FILE" ] || fail "compose file missing: $COMPOSE_FILE"
-[ -d "$DB_DIR" ] || fail "database dir missing: $DB_DIR"
-[ -f "$DB_DIR/db.sqlite3" ] || fail "main sqlite DB missing: $DB_DIR/db.sqlite3; refusing to start fresh DB"
-[ -s "$DB_DIR/db.sqlite3" ] || fail "main sqlite DB empty: $DB_DIR/db.sqlite3; refusing to start fresh DB"
-[ -d "$CONFIG_DIR" ] || fail "config dir missing: $CONFIG_DIR"
-[ -f "$CONFIG_DIR/config.yaml" ] || fail "config missing: $CONFIG_DIR/config.yaml"
+require_data() {
+  [ -f "$COMPOSE_FILE" ] || fail "compose file missing: $COMPOSE_FILE"
+  [ -d "$DB_DIR" ] || fail "database dir missing: $DB_DIR"
+  [ -f "$DB_DIR/db.sqlite3" ] || fail "main sqlite DB missing: $DB_DIR/db.sqlite3; refusing to start fresh DB"
+  [ -s "$DB_DIR/db.sqlite3" ] || fail "main sqlite DB empty: $DB_DIR/db.sqlite3; refusing to start fresh DB"
+  [ -d "$CONFIG_DIR" ] || fail "config dir missing: $CONFIG_DIR"
+  [ -f "$CONFIG_DIR/config.yaml" ] || fail "config missing: $CONFIG_DIR/config.yaml"
+}
+
+require_repo_safety() {
+  grep -q 'FNS_DATA_DIR:-/data/fast-note-sync' "$COMPOSE_FILE" || fail "compose no longer pins FNS_DATA_DIR default; inspect before restart"
+  grep -q '/fast-note-sync/storage/' "$COMPOSE_FILE" || fail "compose storage mount changed; inspect before restart"
+  grep -q '/fast-note-sync/config/' "$COMPOSE_FILE" || fail "compose config mount changed; inspect before restart"
+  grep -q 'sqlite database file missing' internal/dao/dao.go || fail "sqlite hard-fail guard missing from internal/dao/dao.go"
+  if grep -q 'reset-password' "$0"; then
+    fail "safe_update.sh must never call reset-password"
+  fi
+}
+
+require_data
+require_repo_safety
 
 mkdir -p "$BACKUP_DIR"
 cp -a "$DB_DIR"/. "$BACKUP_DIR"/
 echo "DB backup created: $BACKUP_DIR"
 
-if [ "${GIT_PULL:-0}" = "1" ]; then
+if [ "${UPSTREAM:-0}" = "1" ]; then
+  git fetch upstream
+  git merge --no-edit upstream/master
+elif [ "${GIT_PULL:-0}" = "1" ]; then
   git pull --ff-only
 fi
+
+require_data
+require_repo_safety
 
 export FNS_DATA_DIR
 
 docker compose -f "$COMPOSE_FILE" pull
 docker compose -f "$COMPOSE_FILE" down
 docker compose -f "$COMPOSE_FILE" up -d
+
+require_data
 
 echo "Safe update done. Data dir: $FNS_DATA_DIR"

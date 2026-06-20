@@ -2,6 +2,7 @@
 
 ## Critical data-safety rules
 
+- Read `docs/PRODUCTION_UPDATE_RUNBOOK.md` before any Docker, update, upstream merge, login-failure, or database-related work.
 - Never start production Docker in a way that can create a fresh empty SQLite database.
 - Never change the mounted data directory unless the user explicitly asks and confirms the old database was copied.
 - Default production data directory is `/data/fast-note-sync`.
@@ -10,25 +11,36 @@
 
 ## Safe update flow
 
+Project update command: `/update`. It is defined in `.pi/prompts/update.md` and should use the repo-local skill `.pi/skills/fns-update/SKILL.md`. Use this workflow whenever the user mentions update, upstream pull/merge, Docker restart, or login failure after update.
+
 Use the safe update script for Docker image updates:
 
 ```bash
 bash docker/safe_update.sh
 ```
 
-Use this only when a git pull is also intended:
+Use this only when a git pull from `origin` is also intended:
 
 ```bash
 GIT_PULL=1 bash docker/safe_update.sh
 ```
+
+Use this only when merging from the original upstream project is intended:
+
+```bash
+UPSTREAM=1 bash docker/safe_update.sh
+```
+
+If the upstream merge conflicts, stop after resolving conflicts and rerun `bash docker/safe_update.sh`; do not manually run Docker down/up.
 
 The script must:
 
 1. Verify the DB directory exists.
 2. Verify `db.sqlite3` exists and is non-empty.
 3. Create a timestamped DB backup under `/data/fast-note-sync/backups/database/`.
-4. Pull the configured image.
-5. Restart via Docker Compose.
+4. Preserve local safety patches after any git pull or upstream merge.
+5. Pull the configured image.
+6. Restart via Docker Compose.
 
 ## Docker Compose
 
@@ -40,6 +52,10 @@ Current host ports:
 - Extra/WebSocket: `9003 -> 9001`
 
 Port `9000` may be used by Portainer, so do not move the app back to host `9000` without checking conflicts.
+
+## Known recurring incident
+
+This deployment has repeatedly lost login/account visibility after updates because Docker was restarted against the wrong or empty SQLite path, or upstream changes overwrote local production safety behavior. Treat every update as data-risky. If login fails after update, inspect `/data/fast-note-sync` mounts and DB files before doing anything else.
 
 ## SQLite hard-fail behavior
 

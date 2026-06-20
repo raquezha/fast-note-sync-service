@@ -111,3 +111,6 @@ CLAUDE.md
 
 # env
 .env
+
+# Local agent retrospective artifacts; never commit
+.notrace/
