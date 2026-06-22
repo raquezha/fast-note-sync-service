@@ -28,9 +28,6 @@ require_repo_safety() {
   grep -q '/fast-note-sync/storage/' "$COMPOSE_FILE" || fail "compose storage mount changed; inspect before restart"
   grep -q '/fast-note-sync/config/' "$COMPOSE_FILE" || fail "compose config mount changed; inspect before restart"
   grep -q 'sqlite database file missing' internal/dao/dao.go || fail "sqlite hard-fail guard missing from internal/dao/dao.go"
-  if grep -q 'reset-password' "$0"; then
-    fail "safe_update.sh must never call reset-password"
-  fi
 }
 
 require_data

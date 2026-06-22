@@ -28,6 +28,7 @@ Based on repo history, these are the incidents this runbook must prevent:
 2. Account/login disappeared after update because the app was using the wrong DB or an empty DB.
 3. Upstream compose defaults conflicted with local production needs: `latest` image, host ports `9000/9001`, and hard-coded mounts.
 4. Port `9000` can conflict with Portainer, so production uses host `9002 -> 9000` and `9003 -> 9001`.
+5. This deployment must stay remotely reachable after update. `HOST_BIND` must not silently fall back to localhost-only if the service is expected to be reached over Tailscale.
 5. Login failures after update were treated like password problems. They are usually data-path/mount problems. Do not reset passwords unless explicitly requested.
 6. Upstream merges can overwrite local safety patches, especially Docker mounts and SQLite missing-file behavior.
 7. This has happened multiple times, so every update must be treated as data-risky until DB, config, mounts, and backup are verified.
@@ -81,7 +82,7 @@ UPSTREAM=1 bash docker/safe_update.sh
 
 If there is a merge conflict, stop. Do not manually run Docker down/up. Resolve conflicts while preserving these local safety patches:
 
-- `docker/docker-compose.yaml` production ports, restart policy, and `FNS_DATA_DIR` mounts.
+- `docker/docker-compose.yaml` production ports, restart policy, `HOST_BIND` behavior, and `FNS_DATA_DIR` mounts.
 - `docker/safe_update.sh` preflight checks and backup.
 - `internal/dao/dao.go` SQLite missing-file hard fail.
 - `AGENTS.md` and this runbook.

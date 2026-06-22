@@ -65,6 +65,12 @@ Expected host ports:
 9003 -> container 9001
 ```
 
+Expected bind behavior for this deployment:
+
+```text
+HOST_BIND defaults to 0.0.0.0 so Tailscale and other remote clients can reach the service.
+```
+
 Port `9000` on host may conflict with Portainer. Do not move the app back to host `9000` unless explicitly requested after checking conflicts.
 
 ## Absolute no-go actions
@@ -156,6 +162,7 @@ After any upstream merge, ensure these remain true:
 - `docker/docker-compose.yaml` uses image/tag intentionally selected by the repo/user.
 - `docker/docker-compose.yaml` has `restart: unless-stopped`.
 - Host ports remain `9002:9000` and `9003:9001` unless user explicitly changes them.
+- `HOST_BIND` behavior is preserved; for this deployment the default must stay reachable for Tailscale (`0.0.0.0`) unless the user explicitly changes it.
 - Storage mount uses `${FNS_DATA_DIR:-/data/fast-note-sync}/storage/`.
 - Config mount uses `${FNS_DATA_DIR:-/data/fast-note-sync}/config/`.
 - `docker/safe_update.sh` verifies DB/config and creates backup before Docker restart.
