@@ -200,8 +200,8 @@ func (r *fakeOIDCUserRepo) UpdatePassword(ctx context.Context, password string, 
 	return nil
 }
 
-func (r *fakeOIDCUserRepo) GetAll(ctx context.Context) ([]*domain.User, error) {
-	return nil, nil
+func (r *fakeOIDCUserRepo) GetList(ctx context.Context, offset, limit int) ([]*domain.User, int64, error) {
+	return nil, 0, nil
 }
 
 func (r *fakeOIDCUserRepo) GetAllUIDs(ctx context.Context) ([]int64, error) {

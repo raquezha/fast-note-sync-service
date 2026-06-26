@@ -207,20 +207,26 @@ func (r *userRepository) GetAllUIDs(ctx context.Context) ([]int64, error) {
 	return uids, nil
 }
 
-// GetAll retrieves all users info
-func (r *userRepository) GetAll(ctx context.Context) ([]*domain.User, error) {
+// GetList retrieves users with pagination // GetList 分页获取用户列表
+func (r *userRepository) GetList(ctx context.Context, offset, limit int) ([]*domain.User, int64, error) {
 	u := r.user().User
-	modelList, err := u.WithContext(ctx).Order(u.IsDeleted, u.CreatedAt).Find()
+	query := u.WithContext(ctx)
 
+	total, err := query.Count()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+
+	modelList, err := query.Order(u.IsDeleted, u.CreatedAt).Offset(offset).Limit(limit).Find()
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var list []*domain.User
 	for _, m := range modelList {
 		list = append(list, r.toDomain(m))
 	}
-	return list, nil
+	return list, total, nil
 }
 
 // Ensure userRepository implements domain.UserRepository interface

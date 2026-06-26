@@ -46,8 +46,8 @@ type UserService interface {
 	// GetAllUIDs 获取所有用户的 UID
 	GetAllUIDs(ctx context.Context) ([]int64, error)
 
-	// GetAll retrieves all users info
-	GetAll(ctx context.Context) ([]*dto.UserDTO, error)
+	// GetList retrieves users with pagination // GetList 分页获取用户列表
+	GetList(ctx context.Context, pager *app.Pager) ([]*dto.UserDTO, int64, error)
 
 	// IsRegisterEnabled checks if registration is allowed
 	// IsRegisterEnabled 检查是否允许注册
@@ -427,18 +427,21 @@ func (s *userService) GetAllUIDs(ctx context.Context) ([]int64, error) {
 	return uids, nil
 }
 
-// GetAll retrieves all users info
-func (s *userService) GetAll(ctx context.Context) ([]*dto.UserDTO, error) {
-	users, err := s.userRepo.GetAll(ctx)
+// GetList retrieves users with pagination // GetList 分页获取用户列表
+func (s *userService) GetList(ctx context.Context, pager *app.Pager) ([]*dto.UserDTO, int64, error) {
+	offset := app.GetPageOffset(pager.Page, pager.PageSize)
+	limit := pager.PageSize
+
+	users, total, err := s.userRepo.GetList(ctx, offset, limit)
 	if err != nil {
-		return nil, code.ErrorDBQuery.WithDetails(err.Error())
+		return nil, 0, code.ErrorDBQuery.WithDetails(err.Error())
 	}
 
 	var results []*dto.UserDTO
-	for _, vault := range users {
-		results = append(results, s.domainToDTO(vault))
+	for _, user := range users {
+		results = append(results, s.domainToDTO(user))
 	}
-	return results, nil
+	return results, total, nil
 }
 
 // IsRegisterEnabled checks if registration is allowed

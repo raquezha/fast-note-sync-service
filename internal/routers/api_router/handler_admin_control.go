@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -103,7 +104,6 @@ func (h *AdminControlHandler) CheckAdmin(c *gin.Context) {
 // @Description Get full system configuration information, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Produce json
 // @Success 200 {object} pkgapp.Res{data=dto.AdminConfig} "Success"
 // @Failure 403 {object} pkgapp.Res "Insufficient privileges"
@@ -180,7 +180,6 @@ func (h *AdminControlHandler) GetConfig(c *gin.Context) {
 // @Description Modify full system configuration information, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Accept json
 // @Produce json
 // @Param params body dto.AdminConfig true "Config Parameters"
@@ -435,7 +434,6 @@ func (h *AdminControlHandler) UpdateConfig(c *gin.Context) {
 // @Description Get user database configuration information, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Produce json
 // @Success 200 {object} pkgapp.Res{data=dto.AdminUserDatabaseConfig} "Success"
 // @Failure 403 {object} pkgapp.Res "Insufficient privileges"
@@ -486,7 +484,6 @@ func (h *AdminControlHandler) GetUserDatabaseConfig(c *gin.Context) {
 // @Description Modify user database configuration information, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Accept json
 // @Produce json
 // @Param params body dto.AdminUserDatabaseConfig true "Config Parameters"
@@ -572,7 +569,6 @@ func (h *AdminControlHandler) UpdateUserDatabaseConfig(c *gin.Context) {
 // @Description Test if the provided database configuration can connect successfully, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Accept json
 // @Produce json
 // @Param params body dto.AdminUserDatabaseConfig true "Config Parameters"
@@ -679,14 +675,11 @@ func (h *AdminControlHandler) ValidateUserDatabaseConfig(c *gin.Context) {
 	response.ToResponse(code.Success.WithDetails("Database connection and permission verification successful"))
 }
 
-
-
 // GetCloudflareConfig retrieves Cloudflare tunnel configuration (requires admin privileges)
 // @Summary Get Cloudflare config
 // @Description Get Cloudflare tunnel configuration, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Produce json
 // @Success 200 {object} pkgapp.Res{data=dto.AdminCloudflareConfig} "Success"
 // @Failure 403 {object} pkgapp.Res "Insufficient privileges"
@@ -722,7 +715,6 @@ func (h *AdminControlHandler) GetCloudflareConfig(c *gin.Context) {
 // @Description Modify Cloudflare tunnel configuration, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Accept json
 // @Produce json
 // @Param params body dto.AdminCloudflareConfig true "Config Parameters"
@@ -778,7 +770,6 @@ func (h *AdminControlHandler) UpdateCloudflareConfig(c *gin.Context) {
 // @Description Create a new user, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Accept json
 // @Produce json
 // @Param params body dto.UserCreateRequest true "Config Parameters"
@@ -817,7 +808,12 @@ func (h *AdminControlHandler) CreateUser(c *gin.Context) {
 	userDTO, err := h.App.UserService.Create(ctx, params)
 	if err != nil {
 		logger.Error("apiRouter.AdminControl.CreateUser.Create err", zap.Error(err))
-		response.ToResponse(code.ErrorUserRegister)
+		var codeErr *code.Code
+		if errors.As(err, &codeErr) {
+			response.ToResponse(codeErr)
+		} else {
+			response.ToResponse(code.ErrorUserRegister.WithDetails(err.Error()))
+		}
 		return
 	}
 
@@ -829,7 +825,6 @@ func (h *AdminControlHandler) CreateUser(c *gin.Context) {
 // @Description Update a user, requires admin privileges
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Accept json
 // @Produce json
 // @Param params body dto.UserUpdateRequest true "Config Parameters"
@@ -863,13 +858,26 @@ func (h *AdminControlHandler) UpdateUser(c *gin.Context) {
 		return
 	}
 
+	// Prevent block an administrator
+	if params.IsDeleted {
+		if params.UID == int64(cfg.User.AdminUID) {
+			response.ToResponse(code.ErrorUserAdminBlock.WithDetails(errs.ErrorsToString()).WithData(errs.MapsToString()))
+			return
+		}
+	}
+
 	ctx := c.Request.Context()
 
 	// Call UserService to perform update user
 	err := h.App.UserService.Update(ctx, params)
 	if err != nil {
 		logger.Error("apiRouter.AdminControl.UpdateUser.Update err", zap.Error(err))
-		response.ToResponse(code.ErrorUserUpdate)
+		var codeErr *code.Code
+		if errors.As(err, &codeErr) {
+			response.ToResponse(codeErr)
+		} else {
+			response.ToResponse(code.ErrorUserUpdate.WithDetails(err.Error()))
+		}
 		return
 	}
 
@@ -881,9 +889,9 @@ func (h *AdminControlHandler) UpdateUser(c *gin.Context) {
 // @Description Handle request to get all users.
 // @Tags Config
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Produce json
-// @Success 200 {object} pkgapp.Res{data=[]dto.UserDTO} "Success"
+// @Param pagination query pkgapp.PaginationRequest true "Pagination Parameters"
+// @Success 200 {object} pkgapp.Res{data=pkgapp.ListRes{list=[]dto.UserDTO}} "Success"
 // @Failure 401 {object} pkgapp.Res "Unauthorized"
 // @Router /api/admin/users/list [get]
 func (h *AdminControlHandler) GetUsers(c *gin.Context) {
@@ -906,16 +914,17 @@ func (h *AdminControlHandler) GetUsers(c *gin.Context) {
 	// Get request context
 	// 获取请求上下文
 	ctx := c.Request.Context()
+	pager := pkgapp.NewPager(c)
 
-	// Call UserService to get all users
-	userDTO, err := h.App.UserService.GetAll(ctx)
+	// Call UserService to get users with pagination // 调用 UserService 分页查询用户列表
+	userDTO, total, err := h.App.UserService.GetList(ctx, pager)
 	if err != nil {
-		logger.Error("apiRouter.AdminControl.GetUsers.GetAll err", zap.Error(err))
+		logger.Error("apiRouter.AdminControl.GetUsers.GetList err", zap.Error(err))
 		response.ToResponse(code.ErrorUserNotFound)
 		return
 	}
 
-	response.ToResponse(code.Success.WithData(userDTO))
+	response.ToResponseList(code.Success, userDTO, int(total))
 }
 
 // GetSystemInfo retrieves system monitoring information (requires admin privileges)
@@ -1282,7 +1291,6 @@ func (h *AdminControlHandler) GC(c *gin.Context) {
 // @Description Get a list of all current WebSocket connections, requires admin privileges
 // @Tags System
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Produce json
 // @Success 200 {object} pkgapp.Res{data=[]pkgapp.WSClientInfo} "Success"
 // @Failure 403 {object} pkgapp.Res "Insufficient privileges"
@@ -1311,7 +1319,6 @@ func (h *AdminControlHandler) GetWSClients(c *gin.Context) {
 // @Description Kick a WebSocket client by TraceID, requires admin privileges
 // @Tags System
 // @Security UserAuthToken
-// @Param token header string true "Auth Token"
 // @Param traceId path string true "Trace ID of the client"
 // @Produce json
 // @Success 200 {object} pkgapp.Res "Success"
@@ -1352,7 +1359,7 @@ func (h *AdminControlHandler) downloadFile(ctx context.Context, url string, dest
 		Transport: &http.Transport{
 			TLSHandshakeTimeout:   30 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
-        	IdleConnTimeout:       90 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
 		},
 	}
 
