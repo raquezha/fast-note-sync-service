@@ -24,10 +24,12 @@ require_data() {
 }
 
 require_repo_safety() {
-  grep -q 'FNS_DATA_DIR:-/data/fast-note-sync' "$COMPOSE_FILE" || fail "compose no longer pins FNS_DATA_DIR default; inspect before restart"
-  grep -q '/fast-note-sync/storage/' "$COMPOSE_FILE" || fail "compose storage mount changed; inspect before restart"
-  grep -q '/fast-note-sync/config/' "$COMPOSE_FILE" || fail "compose config mount changed; inspect before restart"
-  grep -q 'sqlite database file missing' internal/dao/dao.go || fail "sqlite hard-fail guard missing from internal/dao/dao.go"
+  grep -Fq 'restart: unless-stopped' "$COMPOSE_FILE" || fail "compose restart policy changed; inspect before restart"
+  grep -Fq '"${HOST_BIND:-0.0.0.0}:9002:9000"' "$COMPOSE_FILE" || fail "compose app port/bind changed; inspect before restart"
+  grep -Fq '"${HOST_BIND:-0.0.0.0}:9003:9001"' "$COMPOSE_FILE" || fail "compose websocket port/bind changed; inspect before restart"
+  grep -Fq '${FNS_DATA_DIR:-/data/fast-note-sync}/storage/:/fast-note-sync/storage/' "$COMPOSE_FILE" || fail "compose storage mount changed; inspect before restart"
+  grep -Fq '${FNS_DATA_DIR:-/data/fast-note-sync}/config/:/fast-note-sync/config/' "$COMPOSE_FILE" || fail "compose config mount changed; inspect before restart"
+  grep -Fq 'sqlite database file missing' internal/dao/dao.go || fail "sqlite hard-fail guard missing from internal/dao/dao.go"
 }
 
 require_data
