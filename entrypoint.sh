@@ -9,9 +9,17 @@ if [[ $PORT != :* ]]; then
 fi
 
 export RUN_MODE=${RUN_MODE:-release}
-export DB_TYPE=${DB_TYPE:-postgres}
-export DB_SSL_MODE=${DB_SSL_MODE:-require}
+export DB_TYPE=${DB_TYPE:-sqlite}
+export DB_PORT=${DB_PORT:-5432}
+export DB_SSL_MODE=${DB_SSL_MODE:-disable}
 export REGISTER_IS_ENABLE=${REGISTER_IS_ENABLE:-true}
+export DB_PATH=${DB_PATH:-storage/database/db.sqlite3}
+export LOCAL_FS_IS_ENABLE=${LOCAL_FS_IS_ENABLE:-true}
+export LOCAL_FS_SAVE_PATH=${LOCAL_FS_SAVE_PATH:-storage/uploads}
+export DB_HOST=${DB_HOST:-localhost}
+export DB_USER=${DB_USER:-root}
+export DB_PASSWORD=${DB_PASSWORD:-}
+export DB_NAME=${DB_NAME:-fast_note_sync}
 
 # Auto-generate secure AUTH_TOKEN_KEY if not provided
 if [ -z "$AUTH_TOKEN_KEY" ]; then

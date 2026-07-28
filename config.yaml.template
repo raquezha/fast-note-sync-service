@@ -7,6 +7,7 @@ security:
 
 database:
   type: "${DB_TYPE}"
+  path: "${DB_PATH}"
   host: "${DB_HOST}"
   port: ${DB_PORT}
   username: "${DB_USER}"
@@ -16,3 +17,8 @@ database:
 
 user:
   register-is-enable: ${REGISTER_IS_ENABLE}
+
+storage:
+  local-fs:
+    is-enable: ${LOCAL_FS_IS_ENABLE}
+    save-path: "${LOCAL_FS_SAVE_PATH}"
