@@ -1,6 +1,7 @@
 package websocket_router
 
 import (
+	"context"
 	"time"
 
 	"github.com/haierkeys/fast-note-sync-service/internal/app"
@@ -10,6 +11,7 @@ import (
 	"github.com/haierkeys/fast-note-sync-service/pkg/convert"
 	"github.com/haierkeys/fast-note-sync-service/pkg/diff"
 	"github.com/haierkeys/fast-note-sync-service/pkg/logger"
+	"github.com/haierkeys/fast-note-sync-service/pkg/safego"
 	"github.com/haierkeys/fast-note-sync-service/pkg/timex"
 	"github.com/haierkeys/fast-note-sync-service/pkg/util"
 
@@ -57,7 +59,7 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 
 	valid, errs := c.BindAndValidWithAction(msg.Type, msg.Data, params)
 	if !valid {
-		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteModify.BindAndValid")
+		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteModify.BindAndValid", msg)
 		return
 	}
 	if params.PathHash == "" {
@@ -81,14 +83,14 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 
 	ctx := c.Context()
 
-	noteSvc := h.App.GetNoteService(c.ClientType, c.ClientName, c.ClientVersion)
+	noteSvc := h.App.GetNoteService(c.ClientType(), c.ClientName(), c.ClientVersion())
 
 	// Check and create vault, internally uses SF to merge concurrent requests, avoiding duplicate creation issues
 	// 检查并创建仓库，内部使用SF合并并发请求, 避免重复创建问题
 	h.App.VaultService.GetOrCreate(ctx, c.User.UID, params.Vault)
 
 	checkParams := convert.StructAssign(params, &dto.NoteUpdateCheckRequest{}).(*dto.NoteUpdateCheckRequest)
-	updateMode, nodeCheck, err := noteSvc.UpdateCheck(ctx, c.User.UID, checkParams)
+	updateMode, checkedNote, nodeCheck, err := noteSvc.UpdateCheckWithNote(ctx, c.User.UID, checkParams)
 
 	if err != nil {
 		h.respondError(c, code.ErrorNoteModifyOrCreateFailed, err, "websocket_router.note.NoteModify.UpdateCheck")
@@ -122,7 +124,42 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 					LastTime: nodeCheck.UpdatedTimestamp,
 					Path:     params.Path,
 					PathHash: params.PathHash,
-				}).WithVault(params.Vault), string(NoteModifyAck))
+				}).WithVault(params.Vault).WithContext(params.Context), string(NoteModifyAck))
+				return
+			}
+
+			// =========================================================================
+			// Hard Conflict Protection: 
+			// If strategy is manualMerge, the request has no resolution mark, and serverHash 
+			// differs from baseHash, block the override immediately and return 530.
+			// 
+			// 硬冲突保护：
+			// 如果合并策略为手动合并，请求中未携带解决标记，且云端哈希与客户端基准哈希不匹配，
+			// 直接拦截该覆写并返回 530 错误及冲突明细。
+			// =========================================================================
+			if c.OfflineSyncStrategy() == "manualMerge" && !params.IsConflictResolved && (serverHash != baseHash || params.BaseHashMissing || baseHash == "") {
+				var baseContent string
+				if !params.BaseHashMissing && baseHash != "" {
+					noteHistory, err := h.App.NoteHistoryService.GetByNoteIDAndHash(ctx, c.User.UID, nodeCheck.ID, baseHash)
+					if err == nil && noteHistory != nil {
+						baseContent = noteHistory.Content
+					}
+				}
+				if baseContent == "" {
+					baseContent = nodeCheck.Content
+				}
+
+				c.ToResponse(code.ErrorSyncConflict.WithData(map[string]interface{}{
+					"path":          params.Path,
+					"pathHash":      params.PathHash,
+					"serverContent": nodeCheck.Content,
+					"baseContent":   baseContent,
+					"serverHash":    serverHash,
+				}).WithVault(params.Vault).WithContext(params.Context), string(NoteSyncNeedPush))
+
+				h.App.Logger().Info("manual merge conflict intercepted on direct NoteModify, blocked and sent 530",
+					zap.String(logger.FieldTraceID, c.TraceID),
+					zap.String(logger.FieldPath, params.Path))
 				return
 			}
 
@@ -135,9 +172,14 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 				delete(c.DiffMergePaths, params.Path)
 				c.DiffMergePathsMu.Unlock()
 
-				// Skip merge and use client to override server directly if no offline sync strategy is set
-				// 没有设置离线同步策略时，跳过合并，直接使用客户端覆盖服务端
-				if c.OfflineSyncStrategy == "" {
+				// If client resolves conflict manually, write directly and broadcast to others
+				// 如果客户端手动解决了冲突，直接写入并广播给其他端
+				if params.IsConflictResolved {
+					h.App.Logger().Info("conflict resolved manually by client, writing directly",
+						zap.String(logger.FieldTraceID, c.TraceID),
+						zap.String(logger.FieldPath, params.Path))
+					isExcludeSelf = false
+				} else if c.OfflineSyncStrategy() == "" {
 					h.App.Logger().Debug("no offline sync strategy, skipping merge, using client to override server",
 						zap.String(logger.FieldTraceID, c.TraceID),
 						zap.Int64(logger.FieldUID, c.User.UID),
@@ -181,7 +223,7 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 						zap.String("serverHash", serverHash),
 						zap.String("baseHash", baseHash),
 						zap.String("contentHash", contentHash),
-						zap.String("offlineSyncStrategy", c.OfflineSyncStrategy))
+						zap.String("offlineSyncStrategy", c.OfflineSyncStrategy()))
 
 					// If it's a diff merge, perform merge logic
 					// Note: Logic to skip merge based on contentHash matching historical snapshot has been removed
@@ -248,6 +290,23 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 					clientContent := params.Content
 					serverContent := nodeCheck.Content
 
+					// If strategy is manualMerge, block and return 530 error with three versions
+					// 如果策略是手动合并，则拦截并返回带三版本内容的 530 错误
+					if c.OfflineSyncStrategy() == "manualMerge" {
+						c.ToResponse(code.ErrorSyncConflict.WithData(map[string]interface{}{
+							"path":          params.Path,
+							"pathHash":      params.PathHash,
+							"serverContent": serverContent,
+							"baseContent":   baseContent,
+							"serverHash":    serverHash,
+						}).WithVault(params.Vault).WithContext(params.Context), string(NoteSyncNeedPush))
+
+						h.App.Logger().Info("manual merge strategy: merge blocked, sent conflict contents to client",
+							zap.String(logger.FieldTraceID, c.TraceID),
+							zap.String(logger.FieldPath, params.Path))
+						return
+					}
+
 					// Determine patch application order
 					// ignoreTimeMerge strategy: ignore timestamp, fixed use client priority
 					// When both sides modify different areas, result is consistent (patch application order doesn't affect)
@@ -257,7 +316,7 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 					// 当两边修改不同区域时，结果一致（patch 应用顺序不影响）
 					// 当两边修改同一区域时，hasConflict 会检测到冲突并创建冲突文件
 					var pc1First bool
-					if c.OfflineSyncStrategy == "ignoreTimeMerge" {
+					if c.OfflineSyncStrategy() == "ignoreTimeMerge" {
 						pc1First = true
 					} else {
 						// Other strategies: use time to determine priority
@@ -291,14 +350,6 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 					// 检查是否存在冲突， 执行进一步合并操作
 					if mergeResult.HasConflict || baseHashNotFound {
 
-						// Notify user of merge conflict, need to handle redundant note content
-						// 通知用户出现合并冲突, 需要处理笔记冗余内容
-						// todo 先暂时不通知用户出现冲突
-						// c.ToResponse(code.ErrorSyncConflict.WithData(dto.NoteSyncNeedPushMessage{
-						// 	Path:     params.Path,
-						// 	PathHash: params.PathHash,
-						// }), NoteSyncNeedPush)
-
 						// Force merge to keep all text from PC1 and PC2
 						// 强制合并 保留PC1 PC2全部文本
 						mergeResult.Content, err = diff.MergeTextsIgnoreConflictIgnoreDelete(baseContent, clientContent, serverContent, pc1First)
@@ -307,37 +358,42 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 							return
 						}
 
-						// // 创建冲突文件保存客户端内容
-						// conflictReq := &dto.ConflictFileRequest{
-						// 	Vault:             params.Vault,
-						// 	OriginalPath:      params.Path,
-						// 	ClientContent:     params.Content,
-						// 	ClientContentHash: params.ContentHash,
-						// 	Ctime:             params.Ctime,
-						// 	Mtime:             params.Mtime,
-						// }
+						// 创建冲突文件保存客户端内容
+						// Create conflict file to preserve the client-side content
+						conflictReq := &dto.ConflictFileRequest{
+							Vault:             params.Vault,
+							OriginalPath:      params.Path,
+							ClientContent:     params.Content,
+							ClientContentHash: params.ContentHash,
+							Ctime:             params.Ctime,
+							Mtime:             params.Mtime,
+						}
 
-						// conflictResp, err := h.App.ConflictService.CreateConflictFile(ctx, c.User.UID, conflictReq)
-						// if err != nil {
-						// 	h.App.Logger().Error("failed to create conflict file",
-						// 		zap.String(logger.FieldTraceID, c.TraceID),
-						// 		zap.Int64(logger.FieldUID, c.User.UID),
-						// 		zap.String(logger.FieldPath, params.Path),
-						// 		zap.Error(err))
-						// 	h.respondError(c, code.ErrorNoteModifyOrCreateFailed, err, "websocket_router.note.NoteModify.CreateConflictFile")
-						// 	return
-						// }
+						conflictResp, err := h.App.ConflictService.CreateConflictFile(ctx, c.User.UID, conflictReq)
+						if err != nil {
+							h.App.Logger().Error("failed to create conflict file",
+								zap.String(logger.FieldTraceID, c.TraceID),
+								zap.Int64(logger.FieldUID, c.User.UID),
+								zap.String(logger.FieldPath, params.Path),
+								zap.Error(err))
+							h.respondError(c, code.ErrorNoteModifyOrCreateFailed, err, "websocket_router.note.NoteModify.CreateConflictFile")
+							return
+						}
 
-						// h.App.Logger().Info("merge conflict detected, conflict file created",
-						// 	zap.String(logger.FieldTraceID, c.TraceID),
-						// 	zap.Int64(logger.FieldUID, c.User.UID),
-						// 	zap.String(logger.FieldPath, params.Path),
-						// 	zap.String("conflictPath", conflictResp.ConflictPath),
-						// 	zap.String("conflictInfo", mergeResult.ConflictInfo))
+						h.App.Logger().Info("merge conflict detected, conflict file created",
+							zap.String(logger.FieldTraceID, c.TraceID),
+							zap.Int64(logger.FieldUID, c.User.UID),
+							zap.String(logger.FieldPath, params.Path),
+							zap.String("conflictPath", conflictResp.ConflictPath),
+							zap.String("conflictInfo", mergeResult.ConflictInfo))
 
-						// // 返回冲突文件创建成功的响应
-						// c.ToResponse(code.ErrorConflictFileCreated.WithData(conflictResp))
-						// return
+						// Notify triggering client of the merge conflict; force-merge result still
+						// continues below and is written to the original path as usual
+						// 通知触发端出现合并冲突；强制合并结果仍按下方现有流程写回原路径
+						c.ToResponse(code.ErrorSyncConflict.WithData(dto.NoteSyncNeedPushMessage{
+							Path:     params.Path,
+							PathHash: params.PathHash,
+						}).WithVault(params.Vault).WithContext(params.Context), string(NoteSyncNeedPush))
 					}
 
 					params.Content = mergeResult.Content
@@ -351,7 +407,7 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 
 		}
 
-		_, note, err := noteSvc.ModifyOrCreate(ctx, c.User.UID, params, true)
+		_, note, err := noteSvc.ModifyOrCreate(ctx, c.User.UID, params, true, checkedNote)
 		if err != nil {
 			h.respondError(c, code.ErrorNoteModifyOrCreateFailed, err, "websocket_router.note.NoteModify.ModifyOrCreate")
 			return
@@ -363,7 +419,7 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 			LastTime: note.UpdatedTimestamp,
 			Path:     note.Path,
 			PathHash: note.PathHash,
-		}).WithVault(params.Vault), string(NoteModifyAck))
+		}).WithVault(params.Vault).WithContext(params.Context), string(NoteModifyAck))
 		c.BroadcastResponse(code.Success.WithData(
 			dto.NoteSyncModifyMessage{
 				Path:             note.Path,
@@ -397,9 +453,9 @@ func (h *NoteWSHandler) NoteModify(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 				LastTime: nodeCheck.UpdatedTimestamp,
 				Path:     params.Path,
 				PathHash: params.PathHash,
-			}).WithVault(params.Vault), string(NoteModifyAck))
+			}).WithVault(params.Vault).WithContext(params.Context), string(NoteModifyAck))
 		} else {
-			c.ToResponse(code.SuccessNoUpdate.WithVault(params.Vault))
+			c.ToResponse(code.SuccessNoUpdate.WithVault(params.Vault).WithContext(params.Context))
 		}
 		return
 	}
@@ -431,13 +487,13 @@ func (h *NoteWSHandler) NoteModifyCheck(c *pkgapp.WebsocketClient, msg *pkgapp.W
 
 	valid, errs := c.BindAndValidWithAction(msg.Type, msg.Data, params)
 	if !valid {
-		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteModifyCheck.BindAndValid")
+		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteModifyCheck.BindAndValid", msg)
 		return
 	}
 
 	ctx := c.Context()
 
-	noteSvc := h.App.GetNoteService(c.ClientType, c.ClientName, c.ClientVersion)
+	noteSvc := h.App.GetNoteService(c.ClientType(), c.ClientName(), c.ClientVersion())
 
 	pkgapp.NoteModifyLog(c.TraceID, c.User.UID, "NoteModifyCheck", params.Path, params.Vault)
 
@@ -506,7 +562,7 @@ func (h *NoteWSHandler) NoteDelete(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 
 	valid, errs := c.BindAndValidWithAction(msg.Type, msg.Data, params)
 	if !valid {
-		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteDelete.BindAndValid")
+		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteDelete.BindAndValid", msg)
 		return
 	}
 
@@ -514,7 +570,7 @@ func (h *NoteWSHandler) NoteDelete(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 
 	ctx := c.Context()
 
-	noteSvc := h.App.GetNoteService(c.ClientType, c.ClientName, c.ClientVersion)
+	noteSvc := h.App.GetNoteService(c.ClientType(), c.ClientName(), c.ClientVersion())
 
 	// Check and create vault, internally uses SF to merge concurrent requests, avoiding duplicate creation issues
 	// 检查并创建仓库，内部使用SF合并并发请求, 避免重复创建问题
@@ -531,7 +587,7 @@ func (h *NoteWSHandler) NoteDelete(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 		LastTime: note.UpdatedTimestamp,
 		Path:     note.Path,
 		PathHash: note.PathHash,
-	}).WithVault(params.Vault), string(NoteDeleteAck))
+	}).WithVault(params.Vault).WithContext(params.Context), string(NoteDeleteAck))
 	c.BroadcastResponse(code.Success.WithData(
 		dto.NoteSyncDeleteMessage{
 			Path:             note.Path,
@@ -568,14 +624,14 @@ func (h *NoteWSHandler) NoteRename(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 	params := &dto.NoteRenameRequest{}
 	valid, errs := c.BindAndValidWithAction(msg.Type, msg.Data, params)
 	if !valid {
-		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteRename.BindAndValid")
+		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteRename.BindAndValid", msg)
 		return
 	}
 
 	pkgapp.NoteModifyLog(c.TraceID, c.User.UID, "NoteRename", params.Path, params.Vault)
 
 	uid := c.User.UID
-	oldNote, newNote, err := h.App.GetNoteService(c.ClientType, c.ClientName, c.ClientVersion).Rename(c.Context(), uid, params)
+	oldNote, newNote, err := h.App.GetNoteService(c.ClientType(), c.ClientName(), c.ClientVersion()).Rename(c.Context(), uid, params)
 	if err != nil {
 		h.respondError(c, code.ErrorRenameNoteTargetExist, err, "websocket_router.note.NoteRename.Rename")
 		return
@@ -587,7 +643,7 @@ func (h *NoteWSHandler) NoteRename(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 		LastTime: newNote.UpdatedTimestamp,
 		Path:     newNote.Path,
 		PathHash: newNote.PathHash,
-	}).WithVault(params.Vault), string(NoteRenameAck))
+	}).WithVault(params.Vault).WithContext(params.Context), string(NoteRenameAck))
 	c.BroadcastResponse(code.Success.WithData(
 		dto.NoteSyncRenameMessage{
 			Path:             newNote.Path,
@@ -607,14 +663,14 @@ func (h *NoteWSHandler) NoteRePush(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 	params := &dto.NoteGetRequest{}
 	valid, errs := c.BindAndValidWithAction(msg.Type, msg.Data, params)
 	if !valid {
-		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteReceiveMissing.BindAndValid")
+		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteReceiveMissing.BindAndValid", msg)
 		return
 	}
 
 	pkgapp.NoteModifyLog(c.TraceID, c.User.UID, "NoteRePush", params.Path, params.Vault)
 
 	uid := c.User.UID
-	note, err := h.App.GetNoteService(c.ClientType, c.ClientName, c.ClientVersion).Get(c.Context(), uid, params)
+	note, err := h.App.GetNoteService(c.ClientType(), c.ClientName(), c.ClientVersion()).Get(c.Context(), uid, params)
 	if err != nil {
 		h.App.Logger().Debug("websocket_router.note.NoteRePush.Get: record not found or error, proceeding to send delete",
 			zap.String(logger.FieldTraceID, c.TraceID),
@@ -646,38 +702,101 @@ func (h *NoteWSHandler) NoteRePush(c *pkgapp.WebsocketClient, msg *pkgapp.WebSoc
 
 }
 
-// NoteSync handles full or incremental note sync
-// 函数名: NoteSync
-// Function name: NoteSync
-// usage: Compares local note list provided by client with server side recent update list, deciding which notes need uploading, mtime sync, deletion or update; finally returns sync end message.
-// 函数使用说明: 根据客户端提供的本地笔记列表与服务器端最近更新列表比较，决定返回哪些笔记需要上传、需要同步 mtime、需要删除或需要更新；最后返回同步结束消息。
-// Parameters:
-//   - c *pkgapp.WebsocketClient: Current WebSocket client connection, including context and response sending capability.
-//
-// 参数说明:
-//   - c *pkgapp.WebsocketClient: 当前 WebSocket 客户端连接，包含上下文与响应发送能力。
-//   - msg *pkgapp.WebSocketMessage: Received sync request, containing client note digest and sync start time, etc.
-//
-// 参数说明:
-//   - msg *pkgapp.WebSocketMessage: 接收到的同步请求，包含客户端的笔记摘要和同步起始时间等信息。
-//
-// Return:
-//   - None
-//
-// 返回值说明:
-//   - 无
 func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocketMessage) {
 	params := &dto.NoteSyncRequest{}
 
 	valid, errs := c.BindAndValidWithAction(msg.Type, msg.Data, params)
 	if !valid {
-		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteSync.BindAndValid")
+		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteSync.BindAndValid", msg)
 		return
 	}
 
+	// 分批协议快速路径：totalBatches <= 1 时直接执行，无需缓存归集
+	// Fast path: totalBatches <= 1 means single batch, skip cache accumulation
+	if params.TotalBatches > 1 {
+		entry, created := syncBatchGetOrCreate(params.Context, "note", params.TotalBatches)
+		if created {
+			// 观测用：若此 context+type 早已集齐并被清理，这里会是迟到重传重建的孤儿 entry
+			// （见同步流水线设计 §3.3 第 2 点），5min TTL 会自动回收，不做额外防护
+			// Observability: if this context+type had already been collected and cleaned up,
+			// this is a late-retransmit rebuild of an orphan entry (design §3.3 point 2);
+			// the 5-minute TTL reclaims it automatically, no extra protection needed
+			h.App.Logger().Debug("websocket_router.note.NoteSync: created new batch cache entry",
+				zap.String(logger.FieldTraceID, c.TraceID),
+				zap.String("context", params.Context),
+				zap.Int("batchIndex", params.BatchIndex),
+				zap.Int("totalBatches", params.TotalBatches))
+		}
+
+		entry.mu.Lock()
+		// 重复 BatchIndex（客户端因未收到 ack 而重传）时跳过 append/计数，只重发 ack
+		// Duplicate BatchIndex (client retransmitted after missing the ack): skip append/count, just resend the ack
+		if !entry.markBatchReceived(params.BatchIndex) {
+			for _, n := range params.Notes {
+				entry.Items = append(entry.Items, n)
+			}
+			entry.ReceivedCount++
+			for _, dn := range params.DelNotes {
+				entry.DelItems = append(entry.DelItems, dn)
+			}
+			for _, mn := range params.MissingNotes {
+				entry.MissingItems = append(entry.MissingItems, mn)
+			}
+			entry.UpdatedAt = time.Now()
+		}
+		received := entry.ReceivedCount
+		total := entry.TotalBatches
+		entry.mu.Unlock()
+
+		// 无条件先回 BatchAck（含集齐的最后一批）：旧客户端把多出的最后一批 ack 静默丢弃
+		// （无监听者的 emit，见设计 §2.1 事实4），新客户端窗口协议靠它滑动
+		// Unconditionally send BatchAck first (including the batch that completes collection):
+		// old clients silently drop the extra ack for the last batch (emit with no listener,
+		// design §2.1 fact 4); new clients rely on it to slide the window
+		c.ToResponse(code.Success.WithData(map[string]interface{}{
+			"context":    params.Context,
+			"batchIndex": params.BatchIndex,
+		}).WithVault(params.Vault).WithContext(params.Context), NoteSyncBatchAck)
+
+		if received < total {
+			// 未集齐：等待其余批次
+			// Not all batches received yet: wait for the rest
+			return
+		}
+
+		// 全部批次到达：从缓存中提取数据，清理缓存，执行差量比对
+		// All batches received: extract from cache, delete cache, run differential sync
+		syncBatchDelete(params.Context, "note")
+		allNotes := make([]dto.NoteSyncCheckRequest, 0, len(entry.Items))
+		for _, item := range entry.Items {
+			allNotes = append(allNotes, item.(dto.NoteSyncCheckRequest))
+		}
+		params.Notes = allNotes
+
+		allDelNotes := make([]dto.NoteSyncDelNote, 0, len(entry.DelItems))
+		for _, item := range entry.DelItems {
+			allDelNotes = append(allDelNotes, item.(dto.NoteSyncDelNote))
+		}
+		params.DelNotes = allDelNotes
+
+		allMissingNotes := make([]dto.NoteSyncDelNote, 0, len(entry.MissingItems))
+		for _, item := range entry.MissingItems {
+			allMissingNotes = append(allMissingNotes, item.(dto.NoteSyncDelNote))
+		}
+		params.MissingNotes = allMissingNotes
+	}
+
+	// 执行原有的差量同步核心逻辑（单批次直接进入，多批次集齐后也进入）
+	// Run original differential sync logic (single-batch enters directly; multi-batch enters after all collected)
+	h.doNoteSync(c, params)
+}
+
+// doNoteSync 执行笔记差量同步核心逻辑（原 NoteSync 函数体）
+// doNoteSync runs the core note differential sync logic (original NoteSync body)
+func (h *NoteWSHandler) doNoteSync(c *pkgapp.WebsocketClient, params *dto.NoteSyncRequest) {
 	ctx := c.Context()
 
-	noteSvc := h.App.GetNoteService(c.ClientType, c.ClientName, c.ClientVersion)
+	noteSvc := h.App.GetNoteService(c.ClientType(), c.ClientName(), c.ClientVersion())
 
 	pkgapp.NoteModifyLog(c.TraceID, c.User.UID, "NoteSync", "", params.Vault)
 
@@ -708,7 +827,7 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 
 	// Create message queue for collecting all messages to be sent
 	// 创建消息队列，用于收集所有待发送的消息
-	var messageQueue []WSQueuedMessage
+	var messageQueue []dto.WSQueuedMessage
 
 	var lastTime int64
 	var needUploadCount int64
@@ -721,20 +840,29 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 	// Handle notes deleted by client
 	// 处理客户端删除的笔记
 	if len(params.DelNotes) > 0 {
-		hasWritePermission := pkgapp.VerifyPermissions(c.Scope, "ws", c.ClientType, "note_w")
+		hasWritePermission := pkgapp.VerifyPermissions(c.Scope, "ws", c.ClientType(), "note_w")
+
+		// 批量预查一次性取回全部 pathHash 的存在性，避免逐条 noteSvc.Get 造成的
+		// N+1 查询（且每条 Get 还会带上完全用不到的正文文件读取）
+		// Batch pre-check existence for all pathHashes in one query, avoiding the N+1
+		// per-item noteSvc.Get calls (each of which also loads content that's never used here)
+		delPathHashes := make([]string, 0, len(params.DelNotes))
+		for _, delNote := range params.DelNotes {
+			delPathHashes = append(delPathHashes, delNote.PathHash)
+		}
+		existsMap, batchErr := noteSvc.ExistsBatch(ctx, c.User.UID, params.Vault, delPathHashes)
+		if batchErr != nil {
+			h.App.Logger().Warn("websocket_router.note.NoteSync.noteSvc.ExistsBatch",
+				zap.String(logger.FieldTraceID, c.TraceID),
+				zap.Int64(logger.FieldUID, c.User.UID),
+				zap.Error(batchErr))
+			existsMap = map[string]bool{}
+		}
 
 		for _, delNote := range params.DelNotes {
-			// Check if note exists before deleting
-			// 删除前检查笔记是否存在
-			getCheckParams := &dto.NoteGetRequest{
-				Vault:    params.Vault,
-				PathHash: delNote.PathHash,
-			}
-			checkNote, err := noteSvc.Get(ctx, c.User.UID, getCheckParams)
-
 			// If note exists, execute delete
 			// 如果笔记存在，执行删除
-			if err == nil && checkNote != nil && checkNote.Action != "delete" {
+			if existsMap[delNote.PathHash] {
 				if !hasWritePermission {
 					h.App.Logger().Warn("websocket_router.note.NoteSync: permission denied for deletion",
 						zap.String(logger.FieldTraceID, c.TraceID),
@@ -764,16 +892,23 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 
 				// Broadcast deletion to other clients
 				// 将删除消息广播给其他客户端
-				c.BroadcastResponse(code.Success.WithData(
-					dto.NoteSyncDeleteMessage{
-						Path:             note.Path,
-						PathHash:         note.PathHash,
-						Ctime:            note.Ctime,
-						Mtime:            note.Mtime,
-						Size:             note.Size,
-						UpdatedTimestamp: note.UpdatedTimestamp,
-					},
-				).WithVault(params.Vault), true, NoteSyncDelete)
+				// 异步 fire-and-forget：DB 删除已在上面同步完成，广播只用于通知其他设备，
+				// 不应让循环等待最慢设备的 wg.Wait()，否则 N 条删除会叠加 N 次广播等待
+				// Async fire-and-forget: the DB delete above already completed synchronously;
+				// broadcasting only notifies other devices and must not make the loop wait on
+				// the slowest device's wg.Wait(), or N deletes would stack N broadcast waits
+				safego.Go(h.App.Logger(), func() {
+					c.BroadcastResponse(code.Success.WithData(
+						dto.NoteSyncDeleteMessage{
+							Path:             note.Path,
+							PathHash:         note.PathHash,
+							Ctime:            note.Ctime,
+							Mtime:            note.Mtime,
+							Size:             note.Size,
+							UpdatedTimestamp: note.UpdatedTimestamp,
+						},
+					).WithVault(params.Vault), true, NoteSyncDelete)
+				})
 
 			} else {
 				// Note does not exist, but we still need to record exclusion and broadcast delete message to ensure data consistency
@@ -789,16 +924,20 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 
 				// Broadcast deletion with available info (Path/PathHash)
 				// 使用现有信息(Path/PathHash)广播删除
-				c.BroadcastResponse(code.Success.WithData(
-					dto.NoteSyncDeleteMessage{
-						Path:             delNote.Path,
-						PathHash:         delNote.PathHash,
-						Ctime:            0,
-						Mtime:            0,
-						Size:             0,
-						UpdatedTimestamp: 0,
-					},
-				).WithVault(params.Vault), true, NoteSyncDelete)
+				// 同上，异步 fire-and-forget，避免逐条等待广播
+				// Same as above, async fire-and-forget, avoids waiting on the broadcast per item
+				safego.Go(h.App.Logger(), func() {
+					c.BroadcastResponse(code.Success.WithData(
+						dto.NoteSyncDeleteMessage{
+							Path:             delNote.Path,
+							PathHash:         delNote.PathHash,
+							Ctime:            0,
+							Mtime:            0,
+							Size:             0,
+							UpdatedTimestamp: 0,
+						},
+					).WithVault(params.Vault), true, NoteSyncDelete)
+				})
 			}
 		}
 	}
@@ -823,8 +962,9 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 				continue
 			}
 			if note != nil && note.Action != "delete" {
-				messageQueue = append(messageQueue, WSQueuedMessage{
-					Action: NoteSyncModify,
+				messageQueue = append(messageQueue, dto.WSQueuedMessage{
+					Context: params.Context,
+					Action:  NoteSyncModify,
 					Data: dto.NoteSyncModifyMessage{
 						Path:             note.Path,
 						PathHash:         note.PathHash,
@@ -857,8 +997,9 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 				delete(cNotesKeys, note.PathHash)
 			}
 			// 将消息添加到队列
-			messageQueue = append(messageQueue, WSQueuedMessage{
-				Action: NoteSyncDelete,
+			messageQueue = append(messageQueue, dto.WSQueuedMessage{
+				Context: params.Context,
+				Action:  NoteSyncDelete,
 				Data: dto.NoteSyncDeleteMessage{
 					Path:             note.Path,
 					PathHash:         note.PathHash,
@@ -885,10 +1026,10 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 					// 内容不一致
 					if cNote.Mtime < note.Mtime {
 
-						switch c.OfflineSyncStrategy {
-						// When ignore time and merge, register those needing merge, notify client to upload note
-						//当忽略时间并合并时,登记需要合并的, 通知客户端上传笔记
-						case "ignoreTimeMerge":
+						switch c.OfflineSyncStrategy() {
+						// When ignore time and merge or manual merge, register those needing merge, notify client to upload note
+						//当忽略时间并合并或手动合并时,登记需要合并的, 通知客户端上传笔记
+						case "ignoreTimeMerge", "manualMerge":
 
 							c.DiffMergePathsMu.Lock()
 							c.DiffMergePaths[note.Path] = pkgapp.DiffMergeEntry{CreatedAt: time.Now()}
@@ -896,8 +1037,9 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 
 							// Add message to queue instead of sending immediately
 							// 将消息添加到队列而非立即发送
-							messageQueue = append(messageQueue, WSQueuedMessage{
-								Action: NoteSyncNeedPush,
+							messageQueue = append(messageQueue, dto.WSQueuedMessage{
+								Context: params.Context,
+								Action:  NoteSyncNeedPush,
 								Data: dto.NoteSyncNeedPushMessage{
 									Path:     note.Path,
 									PathHash: note.PathHash,
@@ -909,13 +1051,15 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 						// 当设置新笔记才进行合并, 因为本地笔记比较老, 服务器通知客户端使用云端笔记覆盖本地
 						// 不设置 默认也一样覆盖
 						case "newTimeMerge", "":
-							// 将消息添加到队列而非立即发送
-							messageQueue = append(messageQueue, WSQueuedMessage{
-								Action: NoteSyncModify,
+							// 将消息添加到队列而非立即发送；正文留空，交由 sendSyncPage 在实际发送该页时按需回填
+							// （note 来自哈希比对阶段的元数据查询，未加载正文）
+							messageQueue = append(messageQueue, dto.WSQueuedMessage{
+								Context: params.Context,
+								Action:  NoteSyncModify,
+								NoteID:  note.ID,
 								Data: dto.NoteSyncModifyMessage{
 									Path:             note.Path,
 									PathHash:         note.PathHash,
-									Content:          note.Content,
 									ContentHash:      note.ContentHash,
 									Ctime:            note.Ctime,
 									Mtime:            note.Mtime,
@@ -929,15 +1073,9 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 
 					} else {
 						// Client note is newer than server, notify client to upload note
-						// Offline sync strategy description:
-						// - ignoreTimeMerge: ignore timestamp, always execute three-way merge, need to register to DiffMergePaths
-						// - newTimeMerge: new time priority, register DiffMergePaths
 						// 客户端笔记 比服务端笔记新, 通知客户端上传笔记
-						// 离线同步策略说明：
-						// - ignoreTimeMerge: 忽略时间戳，始终执行三方合并，需要登记到 DiffMergePaths
-						// - newTimeMerge: 新时间优先, 登记 DiffMergePaths
 
-						if c.OfflineSyncStrategy == "ignoreTimeMerge" || c.OfflineSyncStrategy == "newTimeMerge" {
+						if c.OfflineSyncStrategy() == "ignoreTimeMerge" || c.OfflineSyncStrategy() == "newTimeMerge" || c.OfflineSyncStrategy() == "manualMerge" {
 							c.DiffMergePathsMu.Lock()
 							c.DiffMergePaths[note.Path] = pkgapp.DiffMergeEntry{CreatedAt: time.Now()}
 							c.DiffMergePathsMu.Unlock()
@@ -945,8 +1083,9 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 
 						// Add message to queue instead of sending immediately
 						// 将消息添加到队列而非立即发送
-						messageQueue = append(messageQueue, WSQueuedMessage{
-							Action: NoteSyncNeedPush,
+						messageQueue = append(messageQueue, dto.WSQueuedMessage{
+							Context: params.Context,
+							Action:  NoteSyncNeedPush,
 							Data: dto.NoteSyncNeedPushMessage{
 								Path:     note.Path,
 								PathHash: note.PathHash,
@@ -959,8 +1098,9 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 					// 内容一致, 但修改时间不一致, 通知客户端更新笔记修改时间
 					// Add message to queue instead of sending immediately
 					// 将消息添加到队列而非立即发送
-					messageQueue = append(messageQueue, WSQueuedMessage{
-						Action: NoteSyncMtime,
+					messageQueue = append(messageQueue, dto.WSQueuedMessage{
+						Context: params.Context,
+						Action:  NoteSyncMtime,
 						Data: dto.NoteSyncMtimeMessage{
 							Path:             note.Path,
 							Ctime:            note.Ctime,
@@ -973,13 +1113,14 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 			} else {
 				// File client doesn't have, notify client to create file
 				// 客户端没有的文件, 通知客户端创建文件
-				// 将消息添加到队列而非立即发送
-				messageQueue = append(messageQueue, WSQueuedMessage{
-					Action: NoteSyncModify,
+				// 将消息添加到队列而非立即发送；正文留空，交由 sendSyncPage 按需回填
+				messageQueue = append(messageQueue, dto.WSQueuedMessage{
+					Context: params.Context,
+					Action:  NoteSyncModify,
+					NoteID:  note.ID,
 					Data: dto.NoteSyncModifyMessage{
 						Path:             note.Path,
 						PathHash:         note.PathHash,
-						Content:          note.Content,
 						ContentHash:      note.ContentHash,
 						Ctime:            note.Ctime,
 						Mtime:            note.Mtime,
@@ -999,10 +1140,17 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 		for pathHash := range cNotesKeys {
 			note := cNotes[pathHash]
 
+			if c.OfflineSyncStrategy() == "ignoreTimeMerge" || c.OfflineSyncStrategy() == "newTimeMerge" || c.OfflineSyncStrategy() == "manualMerge" {
+				c.DiffMergePathsMu.Lock()
+				c.DiffMergePaths[note.Path] = pkgapp.DiffMergeEntry{CreatedAt: time.Now()}
+				c.DiffMergePathsMu.Unlock()
+			}
+
 			// Add message to queue instead of sending immediately
 			// 将消息添加到队列而非立即发送
-			messageQueue = append(messageQueue, WSQueuedMessage{
-				Action: NoteSyncNeedPush,
+			messageQueue = append(messageQueue, dto.WSQueuedMessage{
+				Context: params.Context,
+				Action:  NoteSyncNeedPush,
 				Data: dto.NoteSyncNeedPushMessage{
 					Path:     note.Path,
 					PathHash: note.PathHash,
@@ -1027,11 +1175,59 @@ func (h *NoteWSHandler) NoteSync(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocke
 		},
 	).WithVault(params.Vault).WithContext(params.Context), NoteSyncEnd)
 
-	// After End message, send all queued messages individually
-	// 在 End 消息后，逐条发送队列中的消息
-	for _, item := range messageQueue {
-		c.ToResponse(code.Success.WithData(item.Data).WithVault(params.Vault).WithContext(params.Context), item.Action)
+	// 在 End 消息后，启动受控分页发送流程
+	if len(messageQueue) > 0 {
+		pageSize := h.App.Config().App.SyncDownChunkNum
+		if pageSize <= 0 {
+			pageSize = 50 // 默认值防呆
+		}
+		// 窗口协商：仅 pv>=2 连接启用下行窗口，旧连接固定 0（stop-and-wait，见设计 §4.2/§4.4）
+		// Window negotiation: only pv>=2 connections get the download window enabled, old
+		// connections stay at 0 (stop-and-wait, see design §4.2/§4.4)
+		window := 0
+		if c.ProtoVersion >= 2 {
+			window = h.App.Config().App.PipelineWindowDownClamped()
+		}
+		uid := c.User.UID
+		entry := &syncDownloadEntry{
+			Context:      params.Context,
+			TypeName:     "note",
+			Vault:        params.Vault,
+			MessageQueue: messageQueue,
+			PageSize:     pageSize,
+			Window:       window,
+			FillContent: func(ctx context.Context, noteID int64) (string, error) {
+				n, err := noteSvc.GetByID(ctx, uid, noteID)
+				if err != nil {
+					return "", err
+				}
+				return n.Content, nil
+			},
+		}
+		syncDownloadStore(params.Context, "note", entry)
+		// 默认不自动发送，等待客户端拉取
 	}
+}
+
+// NoteSyncPageAck handles WebSocket messages for client page ACK
+// NoteSyncPageAck 处理客户端发来的分页下载 ACK 消息
+func (h *NoteWSHandler) NoteSyncPageAck(c *pkgapp.WebsocketClient, msg *pkgapp.WebSocketMessage) {
+	params := &dto.SyncPageAckRequest{}
+	valid, errs := c.BindAndValidWithAction(msg.Type, msg.Data, params)
+	if !valid {
+		h.respondErrorWithData(c, code.ErrorInvalidParams.WithDetails(errs.ErrorsToString()), errs, errs.MapsToString(), "websocket_router.note.NoteSyncPageAck.BindAndValid", msg)
+		return
+	}
+
+	entry, ok := syncDownloadGet(params.Context, "note")
+	if !ok {
+		h.App.Logger().Warn("NoteSyncPageAck: sync download entry not found",
+			zap.String(logger.FieldTraceID, c.TraceID),
+			zap.String("context", params.Context))
+		return
+	}
+
+	handlePageAck(c, entry, params.PageIndex, "note", h.App.Logger(), c.TraceID)
 }
 
 // UserInfo verifies and retrieves user info

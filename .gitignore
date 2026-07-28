@@ -114,3 +114,4 @@ CLAUDE.md
 
 # Local agent retrospective artifacts; never commit
 .notrace/
+fast-note-sync-service

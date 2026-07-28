@@ -19,6 +19,7 @@ message WSResponse {
     string details = 5;   // Error details // 错误细节
     string vault = 6;     // Vault name // 笔记库名称
     string context = 7;   // Context // 上下文
+    int32 pageIndex = 8;  // 1-BASED wire value (download window page attribution and idempotency key, see sync pipeline design §4): 0 (or absent) = non-paginated message; n>0 = download page n-1 (0-based internal page number). 1-based because proto3 doesn't encode zero values: a 0-based page 0 would decode as 0, indistinguishable from non-paginated messages. Sender: only filled for pv>=2 connections. The client-to-server PageAck.pageIndex request field stays 0-based and is NOT affected. // 线上值为 1-BASED（下行窗口的页归属与幂等去重依据，见同步流水线设计 §4）：0（或缺省）= 非分页消息；n>0 = 下载页 n-1（内部 0-based 页码）。采用 1-based 是因为 proto3 不编码零值：0-based 的第 0 页解码后为 0，与非分页消息无法区分。发送端：仅 pv>=2 连接填写。客户端→服务端的 PageAck.pageIndex 请求字段保持 0-based，不受影响
 }
 
 // ------------------------------------
@@ -58,6 +59,10 @@ message CheckVersionInfo {
     string pluginVersionNewChangelog = 11;
     string pluginVersionNewChangelogContent = 12;
     repeated HistoricalVersion pluginVersionHistory = 13;
+    int32 syncUpChunkNum = 14;
+    int32 syncDownChunkNum = 15;
+    int32 pipelineWindowUp = 16;   // Negotiated upload pipeline window; 0 = stop-and-wait // 上行流水线窗口协商值；0 = stop-and-wait
+    int32 pipelineWindowDown = 17; // Negotiated download pipeline window; 0 = stop-and-wait // 下行流水线窗口协商值；0 = stop-and-wait
 }
 
 // ------------------------------------
@@ -84,6 +89,8 @@ message NoteSyncRequest {
     repeated NoteSyncCheckRequest notes = 4;
     repeated NoteSyncDelNote delNotes = 5;
     repeated NoteSyncDelNote missingNotes = 6;
+    int32 batchIndex = 7;
+    int32 totalBatches = 8;
 }
 
 message NoteModifyOrCreateRequest {
@@ -97,6 +104,8 @@ message NoteModifyOrCreateRequest {
     int64 ctime = 8;
     int64 mtime = 9;
     bool createOnly = 10;
+    string context = 11;
+    bool isConflictResolved = 12;
 }
 
 message NoteUpdateCheckRequest {
@@ -112,6 +121,7 @@ message NoteDeleteRequest {
     string vault = 1;
     string path = 2;
     string pathHash = 3;
+    string context = 4;
 }
 
 message NoteRenameRequest {
@@ -120,6 +130,7 @@ message NoteRenameRequest {
     string pathHash = 3;
     string oldPath = 4;
     string oldPathHash = 5;
+    string context = 6;
 }
 
 message NoteGetRequest {
@@ -180,6 +191,9 @@ message NoteSyncEndMessage {
 message NoteSyncNeedPushMessage {
     string path = 1;
     string pathHash = 2;
+    string serverContent = 3;
+    string baseContent = 4;
+    string serverHash = 5;
 }
 
 message NoteModifyAckMessage {
@@ -211,6 +225,8 @@ message FileSyncRequest {
     repeated FileSyncCheckRequest files = 4;
     repeated FileSyncDelFile delFiles = 5;
     repeated FileSyncDelFile missingFiles = 6;
+    int32 batchIndex = 7;
+    int32 totalBatches = 8;
 }
 
 message FileSyncCheckRequest {
@@ -235,12 +251,14 @@ message FileUploadCheckRequest {
     int64 size = 5;
     int64 ctime = 6;
     int64 mtime = 7;
+    string context = 8;
 }
 
 message FileDeleteRequest {
     string vault = 1;
     string path = 2;
     string pathHash = 3;
+    string context = 4;
 }
 
 message FileRenameRequest {
@@ -249,6 +267,7 @@ message FileRenameRequest {
     string pathHash = 3;
     string oldPath = 4;
     string oldPathHash = 5;
+    string context = 6;
 }
 
 message FileChunkDownloadRequest {
@@ -257,12 +276,15 @@ message FileChunkDownloadRequest {
     string pathHash = 3;
     string sessionId = 4;
     int64 chunkIndex = 5;
+    string context = 6;
 }
 
 message FileGetRequest {
     string vault = 1;
     string path = 2;
     string pathHash = 3;
+    bool isRecycle = 4;
+    string context = 5;
 }
 
 // --- File Responses ---
@@ -360,6 +382,8 @@ message SettingSyncRequest {
     repeated SettingSyncCheckRequest settings = 4;
     repeated SettingSyncDelSetting delSettings = 5;
     repeated SettingSyncDelSetting missingSettings = 6;
+    int32 batchIndex = 7;
+    int32 totalBatches = 8;
 }
 
 message SettingSyncCheckRequest {
@@ -383,6 +407,7 @@ message SettingModifyOrCreateRequest {
     string contentHash = 5;
     int64 ctime = 6;
     int64 mtime = 7;
+    string context = 8;
 }
 
 message SettingUpdateCheckRequest {
@@ -398,6 +423,7 @@ message SettingDeleteRequest {
     string vault = 1;
     string path = 2;
     string pathHash = 3;
+    string context = 4;
 }
 
 message SettingGetRequest {
@@ -484,18 +510,22 @@ message FolderSyncRequest {
     repeated FolderSyncCheckRequest folders = 4;
     repeated FolderSyncDelFolder delFolders = 5;
     repeated FolderSyncDelFolder missingFolders = 6;
+    int32 batchIndex = 7;
+    int32 totalBatches = 8;
 }
 
 message FolderCreateRequest {
     string vault = 1;
     string path = 2;
     string pathHash = 3;
+    string context = 4;
 }
 
 message FolderDeleteRequest {
     string vault = 1;
     string path = 2;
     string pathHash = 3;
+    string context = 4;
 }
 
 message FolderRenameRequest {
@@ -504,6 +534,7 @@ message FolderRenameRequest {
     string pathHash = 3;
     string oldPath = 4;
     string oldPathHash = 5;
+    string context = 6;
 }
 
 // --- Folder Responses ---
@@ -557,3 +588,61 @@ message FolderDeleteAckMessage {
     string path = 2;
     string pathHash = 3;
 }
+
+// ------------------------------------
+// 5. Sync Page Messages
+// ------------------------------------
+
+message NoteSyncPageMessage {
+    int32 pageIndex = 2;
+    int32 pageSize = 3;
+    int32 totalCount = 4;
+    bool isLast = 5;
+}
+
+message NoteSyncPageAckRequest {
+    string context = 1;
+    string vault = 2;
+    int32 pageIndex = 3;
+}
+
+message FileSyncPageMessage {
+    int32 pageIndex = 2;
+    int32 pageSize = 3;
+    int32 totalCount = 4;
+    bool isLast = 5;
+}
+
+message FileSyncPageAckRequest {
+    string context = 1;
+    string vault = 2;
+    int32 pageIndex = 3;
+}
+
+message SettingSyncPageMessage {
+    int32 pageIndex = 2;
+    int32 pageSize = 3;
+    int32 totalCount = 4;
+    bool isLast = 5;
+}
+
+message SettingSyncPageAckRequest {
+    string context = 1;
+    string vault = 2;
+    int32 pageIndex = 3;
+}
+
+message FolderSyncPageMessage {
+    int32 pageIndex = 2;
+    int32 pageSize = 3;
+    int32 totalCount = 4;
+    bool isLast = 5;
+}
+
+message FolderSyncPageAckRequest {
+    string context = 1;
+    string vault = 2;
+    int32 pageIndex = 3;
+}
+
+

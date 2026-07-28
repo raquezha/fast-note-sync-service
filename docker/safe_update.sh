@@ -8,19 +8,26 @@ CONFIG_DIR="$FNS_DATA_DIR/config"
 BACKUP_ROOT="$FNS_DATA_DIR/backups/database"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$BACKUP_ROOT/$STAMP"
+HELPER_IMAGE="${HELPER_IMAGE:-haierkeys/fast-note-sync-service:latest}"
 
 fail() {
   echo "ERROR: $*" >&2
   exit 1
 }
 
+data_sh() {
+  docker run --rm --entrypoint sh -v "$FNS_DATA_DIR:/fns-data" "$HELPER_IMAGE" -c "$1"
+}
+
 require_data() {
   [ -f "$COMPOSE_FILE" ] || fail "compose file missing: $COMPOSE_FILE"
-  [ -d "$DB_DIR" ] || fail "database dir missing: $DB_DIR"
-  [ -f "$DB_DIR/db.sqlite3" ] || fail "main sqlite DB missing: $DB_DIR/db.sqlite3; refusing to start fresh DB"
-  [ -s "$DB_DIR/db.sqlite3" ] || fail "main sqlite DB empty: $DB_DIR/db.sqlite3; refusing to start fresh DB"
-  [ -d "$CONFIG_DIR" ] || fail "config dir missing: $CONFIG_DIR"
-  [ -f "$CONFIG_DIR/config.yaml" ] || fail "config missing: $CONFIG_DIR/config.yaml"
+  data_sh "
+    [ -d /fns-data/storage/database ] || { echo 'ERROR: database dir missing: $DB_DIR' >&2; exit 1; }
+    [ -f /fns-data/storage/database/db.sqlite3 ] || { echo 'ERROR: main sqlite DB missing: $DB_DIR/db.sqlite3; refusing to start fresh DB' >&2; exit 1; }
+    [ -s /fns-data/storage/database/db.sqlite3 ] || { echo 'ERROR: main sqlite DB empty: $DB_DIR/db.sqlite3; refusing to start fresh DB' >&2; exit 1; }
+    [ -d /fns-data/config ] || { echo 'ERROR: config dir missing: $CONFIG_DIR' >&2; exit 1; }
+    [ -f /fns-data/config/config.yaml ] || { echo 'ERROR: config missing: $CONFIG_DIR/config.yaml' >&2; exit 1; }
+  "
 }
 
 require_repo_safety() {
@@ -35,8 +42,7 @@ require_repo_safety() {
 require_data
 require_repo_safety
 
-mkdir -p "$BACKUP_DIR"
-cp -a "$DB_DIR"/. "$BACKUP_DIR"/
+data_sh "mkdir -p '/fns-data/backups/database/$STAMP' && cp -a /fns-data/storage/database/. '/fns-data/backups/database/$STAMP/'"
 echo "DB backup created: $BACKUP_DIR"
 
 if [ "${UPSTREAM:-0}" = "1" ]; then

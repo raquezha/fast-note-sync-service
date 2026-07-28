@@ -133,7 +133,7 @@ func (h *AdminControlHandler) GetConfig(c *gin.Context) {
 		FileChunkSize:           &cfg.App.FileChunkSize,
 		SoftDeleteRetentionTime: &cfg.App.SoftDeleteRetentionTime,
 		UploadSessionTimeout:    &cfg.App.UploadSessionTimeout,
-		HistoryKeepVersions:     &cfg.App.HistoryKeepVersions,
+		HistoryKeepVersions:     cfg.App.HistoryKeepVersions,
 		HistorySaveDelay:        &cfg.App.HistorySaveDelay,
 		// DefaultAPIFolder:        &cfg.App.DefaultAPIFolder,
 		AdminUID:                      &cfg.User.AdminUID,
@@ -170,6 +170,8 @@ func (h *AdminControlHandler) GetConfig(c *gin.Context) {
 		FtsBleveStoreRaw:              cfg.App.FtsBleveStoreRaw,
 		GitName:                       &cfg.Git.Name,
 		GitEmail:                      &cfg.Git.Email,
+		PipelineWindowUp:              cfg.App.PipelineWindowUp,
+		PipelineWindowDown:            cfg.App.PipelineWindowDown,
 	}
 
 	response.ToResponse(code.Success.WithData(data))
@@ -222,8 +224,8 @@ func (h *AdminControlHandler) UpdateConfig(c *gin.Context) {
 		return
 	}
 
-	// Validate historySaveDelay cannot be less than 10 seconds
-	// 验证 historySaveDelay 不能小于 10 秒
+	// Validate historySaveDelay cannot be less than 1 second
+	// 验证 historySaveDelay 不能小于 1 秒
 	if params.HistorySaveDelay != nil && *params.HistorySaveDelay != "" {
 		delay, err := util.ParseDuration(*params.HistorySaveDelay)
 		if err != nil {
@@ -232,10 +234,10 @@ func (h *AdminControlHandler) UpdateConfig(c *gin.Context) {
 			response.ToResponse(code.ErrorInvalidParams.WithDetails("historySaveDelay format invalid, e.g. 10s, 1m"))
 			return
 		}
-		if delay < 10*time.Second {
+		if delay < 1*time.Second {
 			logger.Warn("apiRouter.WebGUI.UpdateConfig historySaveDelay too small",
 				zap.String("value", *params.HistorySaveDelay))
-			response.ToResponse(code.ErrorInvalidParams.WithDetails("historySaveDelay must be at least 10s"))
+			response.ToResponse(code.ErrorInvalidParams.WithDetails("historySaveDelay must be at least 1s"))
 			return
 		}
 	}
@@ -310,7 +312,7 @@ func (h *AdminControlHandler) UpdateConfig(c *gin.Context) {
 		cfg.App.UploadSessionTimeout = *params.UploadSessionTimeout
 	}
 	if params.HistoryKeepVersions != nil {
-		cfg.App.HistoryKeepVersions = *params.HistoryKeepVersions
+		cfg.App.HistoryKeepVersions = params.HistoryKeepVersions
 	}
 	if params.HistorySaveDelay != nil {
 		cfg.App.HistorySaveDelay = *params.HistorySaveDelay
@@ -332,6 +334,10 @@ func (h *AdminControlHandler) UpdateConfig(c *gin.Context) {
 	}
 	if params.PullSource != nil {
 		cfg.App.PullSource = *params.PullSource
+		// Sync the running SourceSelector so the change takes effect immediately
+		// instead of waiting for a server restart.
+		// 同步到运行中的 SourceSelector，使改动立即生效，无需重启服务端。
+		h.App.SetPullSourceMode(*params.PullSource)
 	}
 	if params.PullReleaseChannel != nil {
 		cfg.App.PullReleaseChannel = *params.PullReleaseChannel
@@ -417,6 +423,16 @@ func (h *AdminControlHandler) UpdateConfig(c *gin.Context) {
 	if params.GitEmail != nil {
 		cfg.Git.Email = *params.GitEmail
 	}
+	if params.PipelineWindowUp != nil {
+		// Stored as-is (may exceed the read-time clamp); PipelineWindowUpClamped()
+		// clamps to [0,32] wherever it's consumed (auth response / ClientInfo).
+		// 原样存储（可能超出读取时的钳制范围）；PipelineWindowUpClamped() 在消费处
+		// （auth 响应 / ClientInfo）统一钳制到 [0,32]。
+		cfg.App.PipelineWindowUp = params.PipelineWindowUp
+	}
+	if params.PipelineWindowDown != nil {
+		cfg.App.PipelineWindowDown = params.PipelineWindowDown
+	}
 
 	// Save configuration to file
 	// 保存配置到文件
@@ -458,6 +474,14 @@ func (h *AdminControlHandler) GetUserDatabaseConfig(c *gin.Context) {
 	}
 
 	dbCfg := cfg.UserDatabase
+	maxIdleConns := 0
+	if dbCfg.MaxIdleConns != nil {
+		maxIdleConns = *dbCfg.MaxIdleConns
+	}
+	maxOpenConns := 0
+	if dbCfg.MaxOpenConns != nil {
+		maxOpenConns = *dbCfg.MaxOpenConns
+	}
 	data := &dto.AdminUserDatabaseConfig{
 		Type:                dbCfg.Type,
 		Path:                dbCfg.Path,
@@ -468,8 +492,8 @@ func (h *AdminControlHandler) GetUserDatabaseConfig(c *gin.Context) {
 		Name:                dbCfg.Name,
 		SSLMode:             dbCfg.SSLMode,
 		Schema:              dbCfg.Schema,
-		MaxIdleConns:        dbCfg.MaxIdleConns,
-		MaxOpenConns:        dbCfg.MaxOpenConns,
+		MaxIdleConns:        maxIdleConns,
+		MaxOpenConns:        maxOpenConns,
 		ConnMaxLifetime:     dbCfg.ConnMaxLifetime,
 		ConnMaxIdleTime:     dbCfg.ConnMaxIdleTime,
 		MaxWriteConcurrency: dbCfg.MaxWriteConcurrency,
@@ -528,8 +552,8 @@ func (h *AdminControlHandler) UpdateUserDatabaseConfig(c *gin.Context) {
 	cfg.UserDatabase.Name = params.Name
 	cfg.UserDatabase.SSLMode = params.SSLMode
 	cfg.UserDatabase.Schema = params.Schema
-	cfg.UserDatabase.MaxIdleConns = params.MaxIdleConns
-	cfg.UserDatabase.MaxOpenConns = params.MaxOpenConns
+	cfg.UserDatabase.MaxIdleConns = &params.MaxIdleConns
+	cfg.UserDatabase.MaxOpenConns = &params.MaxOpenConns
 	cfg.UserDatabase.ConnMaxLifetime = params.ConnMaxLifetime
 	cfg.UserDatabase.ConnMaxIdleTime = params.ConnMaxIdleTime
 	cfg.UserDatabase.MaxWriteConcurrency = params.MaxWriteConcurrency
@@ -619,8 +643,8 @@ func (h *AdminControlHandler) ValidateUserDatabaseConfig(c *gin.Context) {
 		SSLMode:             params.SSLMode,
 		Schema:              params.Schema,
 		AutoMigrate:         &autoMigrate,
-		MaxIdleConns:        params.MaxIdleConns,
-		MaxOpenConns:        params.MaxOpenConns,
+		MaxIdleConns:        &params.MaxIdleConns,
+		MaxOpenConns:        &params.MaxOpenConns,
 		ConnMaxLifetime:     params.ConnMaxLifetime,
 		ConnMaxIdleTime:     params.ConnMaxIdleTime,
 		EnableWriteQueue:    &enableQueue,
@@ -1144,14 +1168,22 @@ func (h *AdminControlHandler) Upgrade(c *gin.Context) {
 	versionRaw := strings.TrimPrefix(version, "v")
 
 	// Determine download URL
-	// 确定下载地址
+	// At upgrade time, probe both sources in auto mode to pick the best one
+	// rather than relying on the cached background-task result.
+	// 确定下载地址：auto 模式在升级时主动探测两源，不依赖后台任务缓存。
+	useGitHub := checkInfo.GithubAvailable
+	if cfg.App.PullSource == "auto" {
+		snap := h.App.SourceSelector().Probe(c.Request.Context())
+		useGitHub = snap.UseGitHub
+	}
+
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 
 	// Example: fast-note-sync-service-2.0.10-linux-amd64.tar.gz
 	fileName := fmt.Sprintf("fast-note-sync-service-%s-%s-%s.tar.gz", versionRaw, goos, goarch)
 	downloadURL := ""
-	if checkInfo.GithubAvailable {
+	if useGitHub {
 		// GitHub releases/download/[tag]/[filename]
 		// Based on user feedback: URL should NOT have 'v' in the tag part if the tag itself doesn't have it
 		downloadURL = fmt.Sprintf("https://github.com/haierkeys/fast-note-sync-service/releases/download/%s/%s", versionRaw, fileName)

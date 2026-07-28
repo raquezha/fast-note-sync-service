@@ -14,6 +14,7 @@ type FileUpdateCheckRequest struct {
 	Size        int64  `json:"size" form:"size" binding:"" example:"1024"`                     // File size // 文件大小
 	Ctime       int64  `json:"ctime" form:"ctime" binding:"required" example:"1700000000"`     // Creation timestamp // 创建时间戳
 	Mtime       int64  `json:"mtime" form:"mtime" binding:"required" example:"1700000000"`     // Modification timestamp // 修改时间戳
+	Context     string `json:"context" form:"context" example:"ctx123"`                        // Context // 同步上下文
 }
 
 // FileUploadRequest Request parameters for direct file upload (Internal/Public isolation)
@@ -45,6 +46,7 @@ type FileDeleteRequest struct {
 	Vault    string `json:"vault" form:"vault" binding:"required" example:"MyVault"`        // Vault name // 保险库名称
 	Path     string `json:"path" form:"path" binding:"required" example:"Image.png"`        // File path // 文件路径
 	PathHash string `json:"pathHash" form:"pathHash" binding:"required" example:"fhash123"` // Path hash // 路径哈希
+	Context  string `json:"context" form:"context" example:"ctx123"`                        // Context // 同步上下文
 }
 
 // FileRestoreRequest parameters for restoring a file
@@ -87,6 +89,8 @@ type FileSyncRequest struct {
 	Context      string                 `json:"context" form:"context" binding:"required" example:"task123"` // Context // 上下文
 	Vault        string                 `json:"vault" form:"vault" binding:"required" example:"MyVault"`     // Vault name // 保险库名称
 	LastTime     int64                  `json:"lastTime" form:"lastTime" example:"1700000000"`               // Last sync time // 最后同步时间
+	BatchIndex   int                    `json:"batchIndex" form:"batchIndex" example:"0"`                    // Current batch index (0-based) // 当前批次索引（0 起）
+	TotalBatches int                    `json:"totalBatches" form:"totalBatches" example:"1"`                // Total batch count // 总批次数
 	Files        []FileSyncCheckRequest `json:"files" form:"files"`                                          // Files to check // 待检查文件列表
 	DelFiles     []FileSyncDelFile      `json:"delFiles" form:"delFiles"`                                    // Files to delete // 待删除文件列表
 	MissingFiles []FileSyncDelFile      `json:"missingFiles" form:"missingFiles"`                            // Missing files // 缺失文件列表
@@ -105,6 +109,7 @@ type FileGetRequest struct {
 	Path      string `json:"path" form:"path" binding:"required" example:"Image.png"` // File path // 文件路径
 	PathHash  string `json:"pathHash" form:"pathHash" example:"fhash123"`             // Path hash // 路径哈希
 	IsRecycle bool   `json:"isRecycle" form:"isRecycle" example:"false"`              // Is in recycle bin // 是否在回收站
+	Context   string `json:"context" form:"context" example:"ctx123"`                 // Context // 同步上下文
 }
 
 // FileListRequest Pagination parameters for retrieving the file list
@@ -125,6 +130,7 @@ type FileRenameRequest struct {
 	PathHash    string `json:"pathHash" form:"pathHash" example:"nfhash123"`                     // New path hash // 新路径哈希
 	OldPath     string `json:"oldPath" form:"oldPath" binding:"required" example:"OldImage.png"` // Old path // 旧路径
 	OldPathHash string `json:"oldPathHash" form:"oldPathHash" example:"ofhash456"`               // Old path hash // 旧路径哈希
+	Context     string `json:"context" form:"context" example:"ctx123"`                          // Context // 同步上下文
 }
 
 // ---------------- DTO / Response ----------------

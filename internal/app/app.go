@@ -16,6 +16,7 @@ import (
 
 	"github.com/haierkeys/fast-note-sync-service/internal/service"
 	pkgapp "github.com/haierkeys/fast-note-sync-service/pkg/app"
+	"github.com/haierkeys/fast-note-sync-service/pkg/fileurl"
 	"github.com/haierkeys/fast-note-sync-service/pkg/workerpool"
 	"github.com/haierkeys/fast-note-sync-service/pkg/writequeue"
 	"golang.org/x/mod/semver"
@@ -222,6 +223,10 @@ func (a *App) CheckVersion(pluginVersion string) pkgapp.CheckVersionInfo {
 	// 返回给客户端的版本号不带 v 前缀
 	cv.VersionNewName = strings.TrimPrefix(cv.VersionNewName, "v")
 	cv.PluginVersionNewName = strings.TrimPrefix(cv.PluginVersionNewName, "v")
+	cv.SyncUpChunkNum = a.config.App.SyncUpChunkNum
+	cv.SyncDownChunkNum = a.config.App.SyncDownChunkNum
+	cv.PipelineWindowUp = a.config.App.PipelineWindowUpClamped()
+	cv.PipelineWindowDown = a.config.App.PipelineWindowDownClamped()
 	// Returns the link information as-is from setting (already set by task)
 	// 直接返回设置中的链接信息（已由任务设置）
 	return cv
@@ -305,6 +310,23 @@ func (a *App) IsProductionMode() bool {
 	return a.config.Log.Production
 }
 
+// SyncChunkNums returns the configured upload/download sync batch sizes, used for v2
+// handshake negotiation (design §2.3).
+// SyncChunkNums 返回配置的上传/下载同步分批大小，用于 v2 握手协商（设计 §2.3）。
+func (a *App) SyncChunkNums() (up int, down int) {
+	return a.config.App.SyncUpChunkNum, a.config.App.SyncDownChunkNum
+}
+
+// PipelineWindows returns the clamped upload/download pipeline window sizes for v2 handshake
+// negotiation (design §2.3); read live off a.config so a runtime admin change (pipeline-window-up/
+// down set to 0) takes effect on the next connection's auth response without a restart.
+// PipelineWindows 返回用于 v2 握手协商（设计 §2.3）的、经过钳制的上下行流水线窗口大小；
+// 实时读取 a.config，因此后台运行时改配置（pipeline-window-up/down 设为 0）无需重启即可在
+// 下一个连接的 auth 响应中生效。
+func (a *App) PipelineWindows() (up int, down int) {
+	return a.config.App.PipelineWindowUpClamped(), a.config.App.PipelineWindowDownClamped()
+}
+
 // GetTokenService gets TokenService
 // GetTokenService 获取 Token 服务
 func (a *App) GetTokenService() any {
@@ -315,6 +337,21 @@ func (a *App) GetTokenService() any {
 // IsPullFromGitHub 返回当前拉取源是否为 GitHub
 func (a *App) IsPullFromGitHub() bool {
 	return a.sourceSelector.IsGitHub()
+}
+
+// SourceSelector returns the underlying SourceSelector, exposing Probe/Snapshot
+// for the version-probe API and webgui latency panel.
+// SourceSelector 返回底层的 SourceSelector，供版本探测接口与前端测速面板使用。
+func (a *App) SourceSelector() *fileurl.SourceSelector {
+	return a.sourceSelector
+}
+
+// SetPullSourceMode updates the runtime source selection mode and invalidates
+// the cached probe snapshot. Called after config hot-reload changes pull-source.
+// SetPullSourceMode 更新运行时的选源模式并使缓存的探测快照失效，
+// 在配置热重载修改 pull-source 后调用。
+func (a *App) SetPullSourceMode(mode string) {
+	a.sourceSelector.SetMode(mode)
 }
 
 // ExecuteWrite executes write operation (serialized through Write Queue)
@@ -640,6 +677,17 @@ func (a *App) Shutdown(ctx context.Context) error {
 			a.logger.Warn("Backup service shutdown error", zap.Error(err))
 		} else {
 			a.logger.Info("Backup service shutdown completed")
+		}
+	}
+
+	// 0.5 Shutdown SyncLogService (flush buffered sync log batch before write queue closes)
+	// 0.5 关闭 SyncLogService（在写队列关闭前 flush 缓冲的同步日志批次）
+	if a.SyncLogService != nil {
+		a.logger.Info("Shutting down sync log service...")
+		if err := a.SyncLogService.Shutdown(ctx); err != nil {
+			a.logger.Warn("Sync log service shutdown error", zap.Error(err))
+		} else {
+			a.logger.Info("Sync log service shutdown completed")
 		}
 	}
 
